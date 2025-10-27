@@ -1,6 +1,7 @@
+
 import React from 'react';
 import { Author, ContentType, Message } from '../types';
-import { AiIcon, UserIcon, DownloadIcon, SpeakerIcon, GlobeIcon, MapPinIcon, AudioDownloadIcon } from './Icons';
+import { AiIcon, UserIcon, DownloadIcon, SpeakerIcon, GlobeIcon, MapPinIcon, AudioDownloadIcon, CopyIcon, CheckIcon } from './Icons';
 
 interface ChatMessageProps {
   message: Message;
@@ -9,10 +10,10 @@ interface ChatMessageProps {
 }
 
 const LoadingIndicator: React.FC = () => (
-  <div className="flex items-center space-x-2">
-    <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></div>
-    <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" style={{ animationDelay: '200ms' }}></div>
-    <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" style={{ animationDelay: '400ms' }}></div>
+  <div className="flex items-center space-x-1.5">
+    <div className="w-2 h-2 rounded-full bg-slate-400 dot-pulse"></div>
+    <div className="w-2 h-2 rounded-full bg-slate-400 dot-pulse" style={{ animationDelay: '0.2s' }}></div>
+    <div className="w-2 h-2 rounded-full bg-slate-400 dot-pulse" style={{ animationDelay: '0.4s' }}></div>
   </div>
 );
 
@@ -92,11 +93,23 @@ const MessageContentRenderer: React.FC<{ content: Message['content'][0] }> = ({ 
 
 const ChatMessage: React.FC<ChatMessageProps> = ({ message, onPlayAudio, onDownloadAudio }) => {
   const isUser = message.author === Author.USER;
+  const [isCopied, setIsCopied] = React.useState(false);
   
   const textContentForActions = message.content
     .filter(c => c.type === ContentType.MARKDOWN || c.type === ContentType.TEXT)
     .map(c => (c as {text: string}).text)
     .join('\n');
+
+  const handleCopyText = () => {
+    if (!textContentForActions) return;
+    navigator.clipboard.writeText(textContentForActions).then(() => {
+        setIsCopied(true);
+        setTimeout(() => setIsCopied(false), 2000); // Reset after 2 seconds
+    }).catch(err => {
+        console.error('Failed to copy text: ', err);
+        alert('Failed to copy text.');
+    });
+  };
 
   const handleDownloadText = () => {
     if (!textContentForActions) return;
@@ -112,7 +125,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({ message, onPlayAudio, onDownl
   };
 
   return (
-    <div className={`flex items-start gap-3 my-6 ${isUser ? 'justify-end' : ''}`}>
+    <div className={`flex items-start gap-3 my-6 ${isUser ? 'justify-end' : 'animate-message-in'}`}>
       {!isUser && (
         <div className="flex-shrink-0 w-10 h-10 rounded-full bg-gradient-to-br from-blue-400 to-sky-500 flex items-center justify-center shadow">
           <AiIcon className="w-6 h-6 text-white" />
@@ -129,6 +142,9 @@ const ChatMessage: React.FC<ChatMessageProps> = ({ message, onPlayAudio, onDownl
               ))}
               {!isUser && textContentForActions && (
                  <div className="absolute -bottom-2 -right-2 flex gap-1">
+                    <button onClick={handleCopyText} title={isCopied ? "Copied!" : "Copy text"} className="p-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-full transition-colors shadow-sm border border-slate-200">
+                       {isCopied ? <CheckIcon className="w-4 h-4 text-green-500" /> : <CopyIcon className="w-4 h-4" />}
+                    </button>
                     <button onClick={() => onPlayAudio(textContentForActions)} title="Read aloud" className="p-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-full transition-colors shadow-sm border border-slate-200">
                        <SpeakerIcon className="w-4 h-4" />
                     </button>

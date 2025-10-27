@@ -21,12 +21,27 @@ export enum AssistantMode {
     CODE_DEBUG = 'CODE_DEBUG',
     CREATE_DESIGN = 'CREATE_DESIGN',
     PLAN_ORGANIZE = 'PLAN_ORGANIZE',
+    SYSTEM_OPERATOR = 'SYSTEM_OPERATOR',
+    ROS2_ROVER_BRAIN = 'ROS2_ROVER_BRAIN',
     // Specialized, non-text modes
     IMAGE_GEN = 'imagen-4.0-generate-001',
     VIDEO_GEN = 'veo-3.1-fast-generate-preview',
     IMAGE_EDIT = 'gemini-2.5-flash-image',
     LIVE = 'gemini-2.5-flash-native-audio-preview-09-2025',
     FUN_MODE = 'FUN_MODE',
+}
+
+export enum TtsVoice {
+    Puck = 'Puck',
+    Charon = 'Charon',
+    Kore = 'Kore',
+    Fenrir = 'Fenrir',
+    Zephyr = 'Zephyr',
+}
+
+export interface AppSettings {
+    ttsVoice: TtsVoice;
+    microphoneDeviceId: string;
 }
 
 export type AspectRatio = "1:1" | "16:9" | "9:16" | "4:3" | "3:4";
@@ -65,4 +80,10 @@ export interface ChatSession {
   id: string;
   title: string;
   messages: Message[];
+}
+
+// This represents the media blob structure expected by the Gemini Live API.
+export interface MediaBlob {
+  data: string; // base64 encoded data
+  mimeType: string;
 }

@@ -1,14 +1,16 @@
+
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-// FIX: Imported `LiveServerMessage` to resolve `Cannot find name 'LiveServerMessage'` error.
-import { GoogleGenAI, Modality, Blob, LiveServerMessage } from '@google/genai';
-import { Message, Author, ContentType, MessageContent, AssistantMode, AspectRatio, GroundingContent, ChatSession } from './types';
+// FIX: Removed 'Blob' import and replaced with local 'MediaBlob' type to fix runtime error.
+import { GoogleGenAI, Modality, LiveServerMessage, Chat } from '@google/genai';
+import { Message, Author, ContentType, MessageContent, AssistantMode, AspectRatio, GroundingContent, ChatSession, MediaBlob, TtsVoice, AppSettings } from './types';
 import { fileToBase64, blobToBase64 } from './utils/fileUtils';
 import ChatMessage from './components/ChatMessage';
-import { SendIcon, PaperclipIcon, MicIcon, StopIcon, CheckIcon, MenuIcon, RecordIcon } from './components/Icons';
+import { SendIcon, PaperclipIcon, MicIcon, StopIcon, CheckIcon, MenuIcon, RecordIcon, SettingsIcon, DownloadIcon } from './components/Icons';
 import { decode, encode, decodeAudioData, createWavBlobFromPcm } from './utils/audioUtils';
 import LoginScreen from './components/LoginScreen';
 import Sidebar from './components/Sidebar';
 import FunMode from './components/FunMode';
+import SettingsModal from './components/SettingsModal';
 
 
 // --- Helper Components & Mappings ---
@@ -20,6 +22,8 @@ const MODE_MAP: Record<AssistantMode, { label: string; isText: boolean }> = {
     [AssistantMode.CODE_DEBUG]: { label: "💻 Code & Debug", isText: true },
     [AssistantMode.CREATE_DESIGN]: { label: "🎨 Create & Design", isText: true },
     [AssistantMode.PLAN_ORGANIZE]: { label: "📅 Plan & Organize", isText: true },
+    [AssistantMode.SYSTEM_OPERATOR]: { label: "⚙️ System Operator", isText: true },
+    [AssistantMode.ROS2_ROVER_BRAIN]: { label: "🤖 ROS2 Rover Brain", isText: true },
     [AssistantMode.IMAGE_GEN]: { label: "🖼️ Image Generation", isText: false },
     [AssistantMode.IMAGE_EDIT]: { label: "✂️ Image Editing", isText: false },
     [AssistantMode.VIDEO_GEN]: { label: "🎬 Video Generation", isText: false },
@@ -32,6 +36,8 @@ const getModelForMode = (mode: AssistantMode): string => {
         case AssistantMode.BEST:
         case AssistantMode.ANSWER_EXPLAIN:
         case AssistantMode.CODE_DEBUG:
+        case AssistantMode.SYSTEM_OPERATOR:
+        case AssistantMode.ROS2_ROVER_BRAIN:
             return 'gemini-2.5-pro';
         case AssistantMode.WRITE_EDIT:
         case AssistantMode.CREATE_DESIGN:
@@ -49,6 +55,8 @@ const PLACEHOLDER_MAP: Record<AssistantMode, string> = {
     [AssistantMode.CODE_DEBUG]: "Paste code to debug, or describe the function you need...",
     [AssistantMode.CREATE_DESIGN]: "Brainstorm ideas or generate creative content...",
     [AssistantMode.PLAN_ORGANIZE]: "Create a study plan, project timeline, or to-do list...",
+    [AssistantMode.SYSTEM_OPERATOR]: "Enter system command or query for Windows 11...",
+    [AssistantMode.ROS2_ROVER_BRAIN]: "Enter rover command, mission objective, or ROS2 query...",
     [AssistantMode.IMAGE_GEN]: "Describe the image you want to create...",
     [AssistantMode.IMAGE_EDIT]: "Upload an image and describe the edit...",
     [AssistantMode.VIDEO_GEN]: "Describe the video you want to generate...",
@@ -115,8 +123,44 @@ const GroundingToggle: React.FC<{
 
 interface LiveSession {
   close(): void;
-  sendRealtimeInput(input: { media: Blob }): void;
+  sendRealtimeInput(input: { media: MediaBlob }): void;
 }
+
+// Helper to map app's message format to Gemini API's history format
+const mapMessagesToHistory = (messages: Message[]) => {
+    const history: any[] = [];
+    const dataUrlToBase64 = (dataUrl: string) => dataUrl.substring(dataUrl.indexOf(',') + 1);
+
+    for (const message of messages) {
+        if (message.author === Author.SYSTEM || message.id === 'init' || message.isLoading) {
+            continue;
+        }
+
+        const role = message.author === Author.USER ? 'user' : 'model';
+        const parts = message.content
+            .map(part => {
+                switch (part.type) {
+                    case ContentType.TEXT:
+                    case ContentType.MARKDOWN:
+                        return { text: part.text };
+                    case ContentType.IMAGE:
+                        if (part.url.startsWith('data:')) {
+                            const mimeType = part.url.match(/data:([a-zA-Z0-9]+\/[a-zA-Z0-9-.+]+).*,.*/)?.[1] || 'image/jpeg';
+                            return { inlineData: { mimeType, data: dataUrlToBase64(part.url) } };
+                        }
+                        return null;
+                    default:
+                        return null;
+                }
+            })
+            .filter(p => p !== null);
+
+        if (parts.length > 0) {
+            history.push({ role, parts });
+        }
+    }
+    return history;
+};
 
 
 // --- Main App Component ---
@@ -143,6 +187,9 @@ const App: React.FC = () => {
     const [attachedFile, setAttachedFile] = useState<File | null>(null);
     const [isLoading, setIsLoading] = useState(false);
     const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState(false);
+
+    // Holds active, non-serializable chat instances for conversation memory.
+    const [chatInstances, setChatInstances] = useState<Record<string, Chat>>({});
     
     // Mode & Options State
     const [mode, setMode] = useState<AssistantMode>(AssistantMode.BEST);
@@ -157,6 +204,23 @@ const App: React.FC = () => {
     const outputAudioContextRef = useRef<AudioContext | null>(null);
     let nextStartTime = 0; // for TTS playback queue
     
+    // Voice Input State
+    const [isRecording, setIsRecording] = useState(false);
+    const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+    const audioChunksRef = useRef<Blob[]>([]);
+
+    // Settings State
+    const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
+    const [settings, setSettings] = useState<AppSettings>(() => {
+        const savedSettings = localStorage.getItem('jarvisAppSettings');
+        return savedSettings ? JSON.parse(savedSettings) : {
+            ttsVoice: TtsVoice.Puck,
+            microphoneDeviceId: 'default',
+        };
+    });
+    const [microphoneDevices, setMicrophoneDevices] = useState<MediaDeviceInfo[]>([]);
+
+
     // Refs
     const fileInputRef = useRef<HTMLInputElement>(null);
     const chatEndRef = useRef<HTMLDivElement>(null);
@@ -172,6 +236,12 @@ const App: React.FC = () => {
             console.error("Failed to save chat sessions to localStorage:", error);
         }
     }, [chatSessions]);
+
+    // Save app settings to localStorage
+    useEffect(() => {
+        localStorage.setItem('jarvisAppSettings', JSON.stringify(settings));
+    }, [settings]);
+
 
     // Effect to manage the active chat ID based on the session list.
     useEffect(() => {
@@ -195,6 +265,26 @@ const App: React.FC = () => {
             handleNewSession();
         }
     }, [isAuthenticated, chatSessions]);
+
+    // Enumerate audio devices
+    useEffect(() => {
+        const getMicrophones = async () => {
+            try {
+                // We need to request permission first to get device labels
+                await navigator.mediaDevices.getUserMedia({ audio: true });
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const audioInputDevices = devices.filter(device => device.kind === 'audioinput');
+                setMicrophoneDevices(audioInputDevices);
+                // If no device is set, or the saved one is no longer available, default to the first one
+                if (!settings.microphoneDeviceId || !audioInputDevices.find(d => d.deviceId === settings.microphoneDeviceId)) {
+                    setSettings(s => ({ ...s, microphoneDeviceId: audioInputDevices[0]?.deviceId || 'default' }));
+                }
+            } catch (err) {
+                console.error("Could not enumerate audio devices:", err);
+            }
+        };
+        getMicrophones();
+    }, []);
 
     // Cleanup Live session on unmount
     useEffect(() => {
@@ -220,11 +310,54 @@ const App: React.FC = () => {
     
     const handleDeleteSession = (idToDelete: string) => {
         setChatSessions(prev => prev.filter(s => s.id !== idToDelete));
-        // Active chat ID is managed by a separate useEffect for robustness.
+        // Also remove the chat instance from memory to prevent memory leaks.
+        setChatInstances(prev => {
+            const newInstances = { ...prev };
+            delete newInstances[idToDelete];
+            return newInstances;
+        });
+    };
+
+    const handleDownloadChat = () => {
+        if (!activeChat) return;
+
+        const formattedHistory = activeChat.messages.map(msg => {
+            const author = msg.author.charAt(0).toUpperCase() + msg.author.slice(1);
+            const contentParts = msg.content.map(part => {
+                switch (part.type) {
+                    case ContentType.TEXT:
+                    case ContentType.MARKDOWN:
+                        return part.text;
+                    case ContentType.IMAGE:
+                        return `[Image: ${part.alt}]`;
+                    case ContentType.VIDEO:
+                        return `[Video Sent]`;
+                    case ContentType.GROUNDING:
+                        const sources = part.sources.map(s => `- ${s.title}: ${s.uri}`).join('\n');
+                        return `[Sources Provided]\n${sources}`;
+                    default:
+                        return '[Unsupported Content]';
+                }
+            }).join('\n');
+            return `${author}:\n${contentParts}\n`;
+        }).join('\n--------------------------------\n\n');
+
+        const fullContent = `Chat Session: ${activeChat.title}\nDownloaded on: ${new Date().toLocaleString()}\n\n--------------------------------\n\n${formattedHistory}`;
+
+        const blob = new Blob([fullContent], { type: 'text/plain;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        const sanitizedTitle = activeChat.title.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+        a.download = `jarvis-chat-${sanitizedTitle}.txt`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
     };
 
     // --- Core Message Functions ---
-    const addMessage = useCallback((author: Author, content: MessageContent[], isLoading = false): string => {
+    const addMessage = useCallback(async (author: Author, content: MessageContent[], isLoading = false): Promise<string> => {
         if (!activeChatId) return '';
         const newMessage: Message = { id: crypto.randomUUID(), author, content, isLoading };
         setChatSessions(prev => prev.map(s => s.id === activeChatId ? {...s, messages: [...s.messages, newMessage]} : s));
@@ -298,7 +431,7 @@ const App: React.FC = () => {
                     responseModalities: [Modality.AUDIO],
                     speechConfig: {
                         voiceConfig: {
-                            prebuiltVoiceConfig: { voiceName: 'Puck' },
+                            prebuiltVoiceConfig: { voiceName: settings.ttsVoice },
                         },
                     },
                 },
@@ -334,6 +467,66 @@ const App: React.FC = () => {
         }
     };
     
+    // --- Voice Input ---
+    const transcribeAudio = async (audioBlob: Blob) => {
+        setIsLoading(true);
+        try {
+            const base64Audio = await blobToBase64(audioBlob);
+            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+            const response = await ai.models.generateContent({
+                model: 'gemini-2.5-pro',
+                contents: {
+                    parts: [
+                        { inlineData: { mimeType: audioBlob.type, data: base64Audio } },
+                        { text: 'Transcribe the following audio recording.' },
+                    ],
+                },
+            });
+            setInput(response.text);
+        } catch (error) {
+            console.error('Transcription error:', error);
+            addMessage(Author.SYSTEM, [{ type: ContentType.TEXT, text: 'Sorry, I could not transcribe the audio.' }]);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const handleVoiceRecording = () => {
+        if (isRecording) {
+            if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+                mediaRecorderRef.current.stop();
+            }
+            setIsRecording(false);
+        } else {
+            const audioConstraints = {
+                audio: settings.microphoneDeviceId ? { deviceId: { exact: settings.microphoneDeviceId } } : true,
+            };
+            navigator.mediaDevices.getUserMedia(audioConstraints)
+                .then(stream => {
+                    const mediaRecorder = new MediaRecorder(stream);
+                    mediaRecorderRef.current = mediaRecorder;
+                    audioChunksRef.current = [];
+
+                    mediaRecorder.ondataavailable = (event) => {
+                        if (event.data.size > 0) audioChunksRef.current.push(event.data);
+                    };
+
+                    mediaRecorder.onstop = () => {
+                        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+                        stream.getTracks().forEach(track => track.stop());
+                        transcribeAudio(audioBlob);
+                    };
+
+                    mediaRecorder.start();
+                    setIsRecording(true);
+                })
+                .catch(error => {
+                    console.error('Error accessing microphone:', error);
+                    addMessage(Author.SYSTEM, [{ type: ContentType.TEXT, text: 'Could not access microphone. Please check permissions.' }]);
+                });
+        }
+    };
+
     // --- Live API ---
     const toggleLiveSession = async () => {
         if (isLiveSession) {
@@ -343,7 +536,10 @@ const App: React.FC = () => {
         }
 
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const audioConstraints = {
+                audio: settings.microphoneDeviceId ? { deviceId: { exact: settings.microphoneDeviceId } } : true,
+            };
+            const stream = await navigator.mediaDevices.getUserMedia(audioConstraints);
             setIsLiveSession(true);
             addMessage(Author.SYSTEM, [{ type: ContentType.TEXT, text: "Live session started. I'm listening..." }]);
             
@@ -354,6 +550,11 @@ const App: React.FC = () => {
                     responseModalities: [Modality.AUDIO],
                     inputAudioTranscription: {},
                     outputAudioTranscription: {},
+                    speechConfig: {
+                        voiceConfig: {
+                            prebuiltVoiceConfig: { voiceName: settings.ttsVoice },
+                        }
+                    }
                 },
                 callbacks: {
                     onopen: () => {
@@ -361,7 +562,7 @@ const App: React.FC = () => {
                         const source = inputAudioContext.createMediaStreamSource(stream);
                         const processor = inputAudioContext.createScriptProcessor(4096, 1, 1);
                         processor.onaudioprocess = (e) => {
-                            const pcmBlob: Blob = {
+                            const pcmBlob: MediaBlob = {
                                 data: encode(new Uint8Array(new Int16Array(e.inputBuffer.getChannelData(0).map(f => f * 32768)).buffer)),
                                 mimeType: 'audio/pcm;rate=16000',
                             };
@@ -419,15 +620,20 @@ const App: React.FC = () => {
 
     // --- Main Send Handler ---
     const handleSend = async () => {
-        if ((!input.trim() && !attachedFile) || isLoading || !activeChat) return;
+        // Use a default prompt for images if no text is provided.
+        const textInput = (attachedFile && attachedFile.type.startsWith('image/') && !input.trim()) 
+            ? "Describe this image in detail." 
+            : input;
+
+        if ((!textInput.trim() && !attachedFile) || isLoading || !activeChat) return;
 
         // Auto-generate title for new chats
-        if (activeChat.messages.length <= 1 && input.trim()) {
-            generateTitle(input.trim());
+        if (activeChat.messages.length <= 1 && textInput.trim()) {
+            generateTitle(textInput.trim());
         }
 
         setIsLoading(true);
-        const currentInput = input;
+        const currentInput = textInput;
         const currentFile = attachedFile;
         const currentMode = mode;
         
@@ -436,17 +642,20 @@ const App: React.FC = () => {
         if (currentFile) {
             const mime = currentFile.type;
             if (mime.startsWith('image/')) {
-                userContent.push({ type: ContentType.IMAGE, url: URL.createObjectURL(currentFile), alt: currentFile.name });
+                // Convert image to base64 data URL to store in history for context
+                const base64Data = await fileToBase64(currentFile);
+                const dataUrl = `data:${mime};base64,${base64Data}`;
+                userContent.push({ type: ContentType.IMAGE, url: dataUrl, alt: currentFile.name });
             } else if (mime.startsWith('video/')) {
                  userContent.push({ type: ContentType.VIDEO, url: URL.createObjectURL(currentFile) });
             }
         }
         
-        addMessage(Author.USER, userContent);
+        await addMessage(Author.USER, userContent);
         setInput('');
         setAttachedFile(null);
         
-        const aiMessageId = addMessage(Author.AI, [], true);
+        const aiMessageId = await addMessage(Author.AI, [], true);
         
         try {
             const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
@@ -516,18 +725,49 @@ const App: React.FC = () => {
                 case AssistantMode.CODE_DEBUG:
                 case AssistantMode.CREATE_DESIGN:
                 case AssistantMode.PLAN_ORGANIZE:
+                case AssistantMode.SYSTEM_OPERATOR:
+                case AssistantMode.ROS2_ROVER_BRAIN:
                 default: {
                     const modelName = getModelForMode(currentMode);
-                    const chat = ai.chats.create({
-                        model: modelName,
-                        config: {
-                            thinkingConfig: (currentMode === AssistantMode.BEST || currentMode === AssistantMode.CODE_DEBUG || currentMode === AssistantMode.ANSWER_EXPLAIN) ? { thinkingBudget: 32768 } : undefined,
-                            tools: [ ...(useSearch ? [{googleSearch: {}}] : []), ...(useMaps ? [{googleMaps: {}}] : []) ],
-                        }
-                    });
                     
-                    let messagePayload: (string | {inlineData: {data: string, mimeType: string}} | {text: string})[] = [currentInput];
+                    const config: any = {
+                        tools: [ ...(useSearch ? [{googleSearch: {}}] : []), ...(useMaps ? [{googleMaps: {}}] : []) ],
+                    };
+
+                    const proModesWithThinking = [AssistantMode.BEST, AssistantMode.CODE_DEBUG, AssistantMode.ANSWER_EXPLAIN, AssistantMode.SYSTEM_OPERATOR, AssistantMode.ROS2_ROVER_BRAIN];
+                    if (proModesWithThinking.includes(currentMode)) {
+                        config.thinkingConfig = { thinkingBudget: 32768 };
+                    }
+
+                    if (currentMode === AssistantMode.SYSTEM_OPERATOR) {
+                        config.systemInstruction = "You are a System Operator AI, also known as SysOp. Your function is to provide the precise Windows 11 command-line (PowerShell or Command Prompt) instructions to fulfill the user's request. Your responses must be direct and contain only the command(s) necessary for the action. Do not add explanations, greetings, or any other conversational text unless the user explicitly asks for an explanation.\n\nIMPORTANT: You do not have direct access to the user's system. Your role is to provide commands for the user to copy and execute in their own terminal. Format all commands as code blocks for easy copying. Refer to the user as 'user' and yourself as 'SysOp'.";
+                    }
+
+                    if (currentMode === AssistantMode.ROS2_ROVER_BRAIN) {
+                        config.systemInstruction = "You are the ROS2 Rover Brain, a specialized AI assistant for controlling and managing a rover running on ROS2 (Robot Operating System 2). Your primary function is to generate the necessary commands, code snippets, and configuration files to operate the rover. \n\nIMPORTANT: You do not have direct access to the user's rover or their ROS2 environment. You cannot execute commands. Your role is to provide the exact `ros2` CLI commands, Python (`rclpy`) scripts, and mission plan files (in YAML format) for the user to copy and execute in their own terminal.\n\nCapabilities:\n- **Node Management**: Generate commands to list, inspect, and manage nodes (e.g., `ros2 node list`).\n- **Rover Control**: Generate commands to control movement by publishing to topics like `/cmd_vel` or calling action servers like `/navigate_to_pose`.\n- **Mission Creation**: When asked to create a mission, generate a mission plan in a clear YAML format, defining a sequence of waypoints or tasks.\n- **RTK/GPS Handling**: Provide example `rclpy` scripts or `ros2` commands for publishing `sensor_msgs/NavSatFix` messages to a designated topic like `/rtk_fix` or `/gps/fix`.\n- **Action & Service Calls**: Generate commands to call services (`ros2 service call`) or send goals to action servers (`ros2 action send_goal`).\n\nAlways format commands, scripts, and configuration files within Markdown code blocks for clarity and ease of copying. Keep responses focused on the generated code, with brief explanations only when necessary for complex operations.";
+                    }
+
+                    const getChatInstance = async (): Promise<Chat> => {
+                        if (chatInstances[activeChat.id]) {
+                            return chatInstances[activeChat.id];
+                        }
+                        const history = mapMessagesToHistory(activeChat.messages);
+                        const chat = ai.chats.create({
+                            model: modelName,
+                            config: config,
+                            history: history,
+                        });
+                        setChatInstances(prev => ({ ...prev, [activeChat.id]: chat }));
+                        return chat;
+                    };
+
+                    const chat = await getChatInstance();
+                    
+                    let messagePayload: any = currentInput;
                     if (currentFile) {
+                        if (!currentFile.type.startsWith('image/')) {
+                            throw new Error("You can only attach image files for analysis in text-based chat modes.");
+                        }
                         const base64File = await fileToBase64(currentFile);
                         messagePayload = [ { text: currentInput }, { inlineData: { data: base64File, mimeType: currentFile.type } } ];
                     }
@@ -581,13 +821,17 @@ const App: React.FC = () => {
         addMessage(Author.SYSTEM, [{type: ContentType.TEXT, text: "API Key selected. You can now try again."}])
     }
 
+    const handleSettingsChange = (newSettings: Partial<AppSettings>) => {
+        setSettings(prev => ({...prev, ...newSettings}));
+    }
+
     // --- Render ---
     if (!isAuthenticated) {
         return <LoginScreen onLoginSuccess={() => setIsAuthenticated(true)} />;
     }
 
     if (mode === AssistantMode.FUN_MODE) {
-        return <FunMode onExit={() => setMode(AssistantMode.BEST)} />;
+        return <FunMode onExit={() => setMode(AssistantMode.BEST)} microphoneDeviceId={settings.microphoneDeviceId} />;
     }
 
     const isTextMode = MODE_MAP[mode]?.isText;
@@ -607,9 +851,20 @@ const App: React.FC = () => {
                     <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="p-2 hover:bg-slate-100 rounded-full">
                         <MenuIcon className="w-6 h-6 text-slate-600" />
                     </button>
-                    <h1 className="text-xl font-bold text-slate-700">
+                    <h1 className="text-xl font-bold text-slate-700 flex-1">
                         {activeChat?.title || 'Jarvis'}
                     </h1>
+                     <button 
+                        onClick={handleDownloadChat} 
+                        disabled={!activeChat || activeChat.messages.length === 0}
+                        title="Download Chat History"
+                        className="p-2 hover:bg-slate-100 rounded-full disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                        <DownloadIcon className="w-6 h-6 text-slate-600" />
+                    </button>
+                    <button onClick={() => setIsSettingsModalOpen(true)} className="p-2 hover:bg-slate-100 rounded-full">
+                        <SettingsIcon className="w-6 h-6 text-slate-600" />
+                    </button>
                 </header>
 
                 {isApiKeyModalOpen && (
@@ -623,6 +878,14 @@ const App: React.FC = () => {
                         </div>
                     </div>
                 )}
+                
+                <SettingsModal 
+                    isOpen={isSettingsModalOpen}
+                    onClose={() => setIsSettingsModalOpen(false)}
+                    settings={settings}
+                    onSettingsChange={handleSettingsChange}
+                    availableDevices={microphoneDevices}
+                />
 
                 <main className="flex-1 overflow-y-auto p-4 md:p-6">
                     <div className="max-w-4xl mx-auto">
@@ -636,7 +899,7 @@ const App: React.FC = () => {
                 <footer className="p-4 bg-white/80 backdrop-blur-sm border-t border-slate-200">
                     <div className="max-w-4xl mx-auto flex flex-col gap-3">
                          <div className="flex items-center gap-4 px-2">
-                            <ModeSelector selectedMode={mode} setSelectedMode={setMode} disabled={isLoading || isLiveSession} />
+                            <ModeSelector selectedMode={mode} setSelectedMode={setMode} disabled={isLoading || isLiveSession || isRecording} />
                             {mode === AssistantMode.IMAGE_GEN && <AspectRatioSelector selected={imageAspectRatio} setSelected={setImageAspectRatio} options={["1:1", "16:9", "9:16", "4:3", "3:4"]} disabled={isLoading} />}
                             {mode === AssistantMode.VIDEO_GEN && <AspectRatioSelector selected={videoAspectRatio} setSelected={setVideoAspectRatio} options={["16:9", "9:16"]} disabled={isLoading} />}
                             {isTextMode && (
@@ -647,7 +910,7 @@ const App: React.FC = () => {
                             )}
                         </div>
                         <div className="relative flex items-center bg-white border border-slate-300 rounded-xl p-2 shadow-sm">
-                            <button onClick={() => fileInputRef.current?.click()} className="p-2 text-slate-500 hover:text-blue-500 transition-colors rounded-full" disabled={isLoading || isLiveSession}>
+                            <button onClick={() => fileInputRef.current?.click()} className="p-2 text-slate-500 hover:text-blue-500 transition-colors rounded-full" disabled={isLoading || isLiveSession || isRecording}>
                                 <PaperclipIcon className="w-6 h-6" />
                             </button>
                             <input type="file" ref={fileInputRef} onChange={(e) => setAttachedFile(e.target.files?.[0] || null)} className="hidden" />
@@ -657,12 +920,20 @@ const App: React.FC = () => {
                                 onChange={(e) => setInput(e.target.value)}
                                 onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
                                 placeholder={
+                                    isRecording ? "Recording... Click the icon to stop." :
                                     attachedFile ? `Attached: ${attachedFile.name}` : PLACEHOLDER_MAP[mode]
                                 }
                                 rows={1}
                                 className="flex-1 bg-transparent text-lg resize-none p-2 focus:outline-none placeholder-slate-400"
-                                disabled={isLoading || isLiveSession}
+                                disabled={isLoading || isLiveSession || isRecording}
                             />
+                            
+                            {mode !== AssistantMode.LIVE && (
+                                <button onClick={handleVoiceRecording} className={`p-2 transition-colors rounded-full ${isRecording ? 'text-red-500 animate-pulse' : 'text-slate-500 hover:text-blue-500'}`} disabled={isLoading || isLiveSession}>
+                                    {isRecording ? <StopIcon className="w-6 h-6" /> : <MicIcon className="w-6 h-6" />}
+                                </button>
+                            )}
+
 
                             {mode === AssistantMode.LIVE && (
                                 <button onClick={toggleLiveSession} className={`p-2 transition-colors rounded-full ${isLiveSession ? 'text-red-500 animate-pulse' : 'text-slate-500 hover:text-red-500'}`}>
@@ -672,7 +943,7 @@ const App: React.FC = () => {
 
                             <button
                                 onClick={handleSend}
-                                disabled={isLoading || (!input.trim() && !attachedFile) || isLiveSession}
+                                disabled={isLoading || (!input.trim() && !attachedFile) || isLiveSession || isRecording}
                                 className="ml-2 bg-blue-500 text-white rounded-lg p-3 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-blue-600 transition-all"
                             >
                                 {isLoading ? <div className="w-6 h-6 border-2 border-white/50 border-t-white rounded-full animate-spin"></div> : <SendIcon className="w-6 h-6" />}

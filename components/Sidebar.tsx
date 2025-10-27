@@ -1,7 +1,7 @@
 
-import React from 'react';
-import { ChatSession } from '../types';
-import { PlusIcon, TrashIcon, AiIcon } from './Icons';
+import React, { useState } from 'react';
+import { ChatSession, ContentType } from '../types';
+import { PlusIcon, TrashIcon, AiIcon, SearchIcon } from './Icons';
 
 interface SidebarProps {
   sessions: ChatSession[];
@@ -20,6 +20,27 @@ const Sidebar: React.FC<SidebarProps> = ({
   onDeleteSession,
   isOpen
 }) => {
+  const [searchTerm, setSearchTerm] = useState('');
+
+  const filteredSessions = sessions.filter(session => {
+    if (!searchTerm.trim()) return true;
+
+    const searchTermLower = searchTerm.toLowerCase();
+
+    // Check session title
+    const titleMatch = session.title.toLowerCase().includes(searchTermLower);
+    if (titleMatch) return true;
+
+    // Check message content
+    const messageMatch = session.messages.some(message =>
+      message.content.some(contentPart =>
+        (contentPart.type === ContentType.TEXT || contentPart.type === ContentType.MARKDOWN) &&
+        (contentPart as any).text.toLowerCase().includes(searchTermLower)
+      )
+    );
+    return messageMatch;
+  });
+
   return (
     <div
       className={`bg-white border-r border-slate-200 flex flex-col h-full transition-all duration-300 ease-in-out ${
@@ -35,9 +56,24 @@ const Sidebar: React.FC<SidebarProps> = ({
         </div>
       </div>
 
+      <div className="p-2 border-b border-slate-200">
+        <div className="relative">
+          <input
+            type="text"
+            placeholder="Search history..."
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className="w-full pl-8 pr-4 py-1.5 text-sm bg-slate-100 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <div className="absolute inset-y-0 left-0 flex items-center pl-2 pointer-events-none text-slate-400">
+            <SearchIcon className="w-5 h-5" />
+          </div>
+        </div>
+      </div>
+
       <div className="flex-grow p-2 overflow-y-auto">
         <nav className="flex flex-col gap-1">
-          {sessions.map((session) => (
+          {filteredSessions.map((session) => (
             <div key={session.id} className="group relative">
               <button
                 onClick={() => onSelectSession(session.id)}

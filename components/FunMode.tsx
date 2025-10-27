@@ -1,19 +1,22 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { GoogleGenAI, Modality, Blob, LiveServerMessage } from '@google/genai';
+// FIX: Removed 'Blob' import and replaced with local 'MediaBlob' type to fix runtime error.
+import { GoogleGenAI, Modality, LiveServerMessage } from '@google/genai';
 import { decode, encode, decodeAudioData } from '../utils/audioUtils';
 import JarvisAvatar from './JarvisAvatar';
 import { CameraIcon, MicIcon } from './Icons';
+import { MediaBlob } from '../types';
 
 interface FunModeProps {
     onExit: () => void;
+    microphoneDeviceId: string;
 }
 
 interface LiveSession {
     close(): void;
-    sendRealtimeInput(input: { media: Blob }): void;
+    sendRealtimeInput(input: { media: MediaBlob }): void;
 }
 
-const FunMode: React.FC<FunModeProps> = ({ onExit }) => {
+const FunMode: React.FC<FunModeProps> = ({ onExit, microphoneDeviceId }) => {
     const [permissionStatus, setPermissionStatus] = useState<'idle' | 'pending' | 'granted' | 'denied'>('idle');
     const videoRef = useRef<HTMLVideoElement>(null);
     const [status, setStatus] = useState('Initializing...');
@@ -64,7 +67,11 @@ const FunMode: React.FC<FunModeProps> = ({ onExit }) => {
         setStatus('Requesting permissions...');
 
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            const constraints = {
+                video: true,
+                audio: microphoneDeviceId ? { deviceId: { exact: microphoneDeviceId } } : true,
+            };
+            const stream = await navigator.mediaDevices.getUserMedia(constraints);
             mediaStreamRef.current = stream;
 
             if (videoRef.current) {
@@ -91,7 +98,7 @@ const FunMode: React.FC<FunModeProps> = ({ onExit }) => {
                         const sourceNode = ctx.createMediaStreamSource(stream);
                         const processor = ctx.createScriptProcessor(4096, 1, 1);
                         processor.onaudioprocess = (e) => {
-                            const pcmBlob: Blob = {
+                            const pcmBlob: MediaBlob = {
                                 data: encode(new Uint8Array(new Int16Array(e.inputBuffer.getChannelData(0).map(f => f * 32768)).buffer)),
                                 mimeType: 'audio/pcm;rate=16000',
                             };
@@ -130,7 +137,7 @@ const FunMode: React.FC<FunModeProps> = ({ onExit }) => {
             setStatus("Error: Could not access camera or microphone.");
             setPermissionStatus('denied');
         }
-    }, [playAudioData, permissionStatus]);
+    }, [playAudioData, permissionStatus, microphoneDeviceId]);
 
     useEffect(() => {
         return () => {
