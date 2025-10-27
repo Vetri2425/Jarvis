@@ -1,0 +1,8 @@
+{
+  "name": "Jarvis AI Assistant",
+  "description": "An all-in-one AI chat bot assistant that supports text, voice, file, image, and video interactions. It can understand and generate various types of content, acting as a versatile virtual assistant.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ]
+}
