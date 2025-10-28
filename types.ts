@@ -23,6 +23,7 @@ export enum AssistantMode {
     PLAN_ORGANIZE = 'PLAN_ORGANIZE',
     SYSTEM_OPERATOR = 'SYSTEM_OPERATOR',
     ROS2_ROVER_BRAIN = 'ROS2_ROVER_BRAIN',
+    SINGING = 'SINGING',
     // Specialized, non-text modes
     IMAGE_GEN = 'imagen-4.0-generate-001',
     VIDEO_GEN = 'veo-3.1-fast-generate-preview',

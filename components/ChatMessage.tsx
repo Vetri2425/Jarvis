@@ -5,8 +5,9 @@ import { AiIcon, UserIcon, DownloadIcon, SpeakerIcon, GlobeIcon, MapPinIcon, Aud
 
 interface ChatMessageProps {
   message: Message;
-  onPlayAudio: (text: string) => void;
-  onDownloadAudio: (text: string) => void;
+  onPlayAudio: (text: string, messageId: string) => void;
+  onDownloadAudio: (text: string, messageId: string) => void;
+  audioProcessing: { messageId: string; action: 'play' | 'download' } | null;
 }
 
 const LoadingIndicator: React.FC = () => (
@@ -15,6 +16,10 @@ const LoadingIndicator: React.FC = () => (
     <div className="w-2 h-2 rounded-full bg-slate-400 dot-pulse" style={{ animationDelay: '0.2s' }}></div>
     <div className="w-2 h-2 rounded-full bg-slate-400 dot-pulse" style={{ animationDelay: '0.4s' }}></div>
   </div>
+);
+
+const Spinner: React.FC<{ className?: string }> = ({ className = 'w-4 h-4' }) => (
+    <div className={`animate-spin rounded-full border-2 border-slate-400 border-t-slate-600 ${className}`}></div>
 );
 
 const handleMediaDownload = async (url: string, filename: string) => {
@@ -91,7 +96,7 @@ const MessageContentRenderer: React.FC<{ content: Message['content'][0] }> = ({ 
   }
 };
 
-const ChatMessage: React.FC<ChatMessageProps> = ({ message, onPlayAudio, onDownloadAudio }) => {
+const ChatMessage: React.FC<ChatMessageProps> = ({ message, onPlayAudio, onDownloadAudio, audioProcessing }) => {
   const isUser = message.author === Author.USER;
   const [isCopied, setIsCopied] = React.useState(false);
   
@@ -124,6 +129,11 @@ const ChatMessage: React.FC<ChatMessageProps> = ({ message, onPlayAudio, onDownl
     URL.revokeObjectURL(url);
   };
 
+  const isProcessingAudio = audioProcessing?.messageId === message.id;
+  const isProcessingPlay = isProcessingAudio && audioProcessing?.action === 'play';
+  const isProcessingDownload = isProcessingAudio && audioProcessing?.action === 'download';
+
+
   return (
     <div className={`flex items-start gap-3 my-6 ${isUser ? 'justify-end' : 'animate-message-in'}`}>
       {!isUser && (
@@ -142,16 +152,16 @@ const ChatMessage: React.FC<ChatMessageProps> = ({ message, onPlayAudio, onDownl
               ))}
               {!isUser && textContentForActions && (
                  <div className="absolute -bottom-2 -right-2 flex gap-1">
-                    <button onClick={handleCopyText} title={isCopied ? "Copied!" : "Copy text"} className="p-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-full transition-colors shadow-sm border border-slate-200">
+                    <button onClick={handleCopyText} title={isCopied ? "Copied!" : "Copy text"} className="p-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-full transition-colors shadow-sm border border-slate-200" disabled={isProcessingAudio}>
                        {isCopied ? <CheckIcon className="w-4 h-4 text-green-500" /> : <CopyIcon className="w-4 h-4" />}
                     </button>
-                    <button onClick={() => onPlayAudio(textContentForActions)} title="Read aloud" className="p-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-full transition-colors shadow-sm border border-slate-200">
-                       <SpeakerIcon className="w-4 h-4" />
+                    <button onClick={() => onPlayAudio(textContentForActions, message.id)} title="Read aloud" className="p-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-full transition-colors shadow-sm border border-slate-200 disabled:opacity-50 disabled:cursor-wait" disabled={isProcessingAudio}>
+                       {isProcessingPlay ? <Spinner /> : <SpeakerIcon className="w-4 h-4" />}
                     </button>
-                    <button onClick={() => onDownloadAudio(textContentForActions)} title="Download audio" className="p-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-full transition-colors shadow-sm border border-slate-200">
-                       <AudioDownloadIcon className="w-4 h-4" />
+                    <button onClick={() => onDownloadAudio(textContentForActions, message.id)} title="Download audio" className="p-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-full transition-colors shadow-sm border border-slate-200 disabled:opacity-50 disabled:cursor-wait" disabled={isProcessingAudio}>
+                       {isProcessingDownload ? <Spinner /> : <AudioDownloadIcon className="w-4 h-4" />}
                     </button>
-                    <button onClick={handleDownloadText} title="Download text" className="p-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-full transition-colors shadow-sm border border-slate-200">
+                    <button onClick={handleDownloadText} title="Download text" className="p-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-full transition-colors shadow-sm border border-slate-200" disabled={isProcessingAudio}>
                        <DownloadIcon className="w-4 h-4" />
                     </button>
                  </div>

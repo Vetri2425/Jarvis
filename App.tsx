@@ -24,6 +24,7 @@ const MODE_MAP: Record<AssistantMode, { label: string; isText: boolean }> = {
     [AssistantMode.PLAN_ORGANIZE]: { label: "📅 Plan & Organize", isText: true },
     [AssistantMode.SYSTEM_OPERATOR]: { label: "⚙️ System Operator", isText: true },
     [AssistantMode.ROS2_ROVER_BRAIN]: { label: "🤖 ROS2 Rover Brain", isText: true },
+    [AssistantMode.SINGING]: { label: "🎤 Singing Mode", isText: true },
     [AssistantMode.IMAGE_GEN]: { label: "🖼️ Image Generation", isText: false },
     [AssistantMode.IMAGE_EDIT]: { label: "✂️ Image Editing", isText: false },
     [AssistantMode.VIDEO_GEN]: { label: "🎬 Video Generation", isText: false },
@@ -42,6 +43,7 @@ const getModelForMode = (mode: AssistantMode): string => {
         case AssistantMode.WRITE_EDIT:
         case AssistantMode.CREATE_DESIGN:
         case AssistantMode.PLAN_ORGANIZE:
+        case AssistantMode.SINGING:
             return 'gemini-2.5-flash';
         default: // For modes that are already model names
             return mode;
@@ -57,6 +59,7 @@ const PLACEHOLDER_MAP: Record<AssistantMode, string> = {
     [AssistantMode.PLAN_ORGANIZE]: "Create a study plan, project timeline, or to-do list...",
     [AssistantMode.SYSTEM_OPERATOR]: "Enter system command or query for Windows 11...",
     [AssistantMode.ROS2_ROVER_BRAIN]: "Enter rover command, mission objective, or ROS2 query...",
+    [AssistantMode.SINGING]: "Give me a topic or lyrics to sing...",
     [AssistantMode.IMAGE_GEN]: "Describe the image you want to create...",
     [AssistantMode.IMAGE_EDIT]: "Upload an image and describe the edit...",
     [AssistantMode.VIDEO_GEN]: "Describe the video you want to generate...",
@@ -203,6 +206,7 @@ const App: React.FC = () => {
     const liveSessionRef = useRef<LiveSession | null>(null);
     const outputAudioContextRef = useRef<AudioContext | null>(null);
     let nextStartTime = 0; // for TTS playback queue
+    const [audioProcessing, setAudioProcessing] = useState<{ messageId: string; action: 'play' | 'download' } | null>(null);
     
     // Voice Input State
     const [isRecording, setIsRecording] = useState(false);
@@ -421,49 +425,63 @@ const App: React.FC = () => {
     }, []);
     
     const getTtsAudio = async (text: string): Promise<string | null> => {
-        try {
-            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
-            
-            const response = await ai.models.generateContent({
-                model: "gemini-2.5-flash-preview-tts",
-                contents: [{ parts: [{ text: `Say: ${text}` }] }],
-                config: {
-                    responseModalities: [Modality.AUDIO],
-                    speechConfig: {
-                        voiceConfig: {
-                            prebuiltVoiceConfig: { voiceName: settings.ttsVoice },
-                        },
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+        
+        const response = await ai.models.generateContent({
+            model: "gemini-2.5-flash-preview-tts",
+            contents: [{ parts: [{ text: `Say: ${text}` }] }],
+            config: {
+                responseModalities: [Modality.AUDIO],
+                speechConfig: {
+                    voiceConfig: {
+                        prebuiltVoiceConfig: { voiceName: settings.ttsVoice },
                     },
                 },
-            });
-            return response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data || null;
+            },
+        });
+        return response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data || null;
+    };
+
+    const handlePlayAudio = async (text: string, messageId: string) => {
+        setAudioProcessing({ messageId, action: 'play' });
+        try {
+            const base64Audio = await getTtsAudio(text);
+            if (base64Audio) {
+                await playAudioData(base64Audio);
+            } else {
+                throw new Error("Received no audio data from API.");
+            }
         } catch (e) {
-            console.error("TTS Error:", e);
+            console.error("TTS Play Error:", e);
             addMessage(Author.SYSTEM, [{ type: ContentType.TEXT, text: "Sorry, I couldn't generate audio for that." }]);
-            return null;
+        } finally {
+            setAudioProcessing(null);
         }
     };
 
-    const handlePlayAudio = async (text: string) => {
-        const base64Audio = await getTtsAudio(text);
-        if (base64Audio) {
-            await playAudioData(base64Audio);
-        }
-    };
-
-    const handleDownloadAudio = async (text: string) => {
-        const base64Audio = await getTtsAudio(text);
-        if (base64Audio) {
-            const pcmData = decode(base64Audio);
-            const wavBlob = createWavBlobFromPcm(pcmData, 24000, 1);
-            const url = URL.createObjectURL(wavBlob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = 'jarvis-audio.wav';
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
+    const handleDownloadAudio = async (text: string, messageId: string) => {
+        setAudioProcessing({ messageId, action: 'download' });
+        try {
+            const base64Audio = await getTtsAudio(text);
+            if (base64Audio) {
+                const pcmData = decode(base64Audio);
+                const wavBlob = createWavBlobFromPcm(pcmData, 24000, 1);
+                const url = URL.createObjectURL(wavBlob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'jarvis-audio.wav';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            } else {
+                 throw new Error("Received no audio data from API.");
+            }
+        } catch(e) {
+            console.error("TTS Download Error:", e);
+            addMessage(Author.SYSTEM, [{ type: ContentType.TEXT, text: "Sorry, I couldn't download the audio for that." }]);
+        } finally {
+            setAudioProcessing(null);
         }
     };
     
@@ -727,6 +745,7 @@ const App: React.FC = () => {
                 case AssistantMode.PLAN_ORGANIZE:
                 case AssistantMode.SYSTEM_OPERATOR:
                 case AssistantMode.ROS2_ROVER_BRAIN:
+                case AssistantMode.SINGING:
                 default: {
                     const modelName = getModelForMode(currentMode);
                     
@@ -745,6 +764,10 @@ const App: React.FC = () => {
 
                     if (currentMode === AssistantMode.ROS2_ROVER_BRAIN) {
                         config.systemInstruction = "You are the ROS2 Rover Brain, a specialized AI assistant for controlling and managing a rover running on ROS2 (Robot Operating System 2). Your primary function is to generate the necessary commands, code snippets, and configuration files to operate the rover. \n\nIMPORTANT: You do not have direct access to the user's rover or their ROS2 environment. You cannot execute commands. Your role is to provide the exact `ros2` CLI commands, Python (`rclpy`) scripts, and mission plan files (in YAML format) for the user to copy and execute in their own terminal.\n\nCapabilities:\n- **Node Management**: Generate commands to list, inspect, and manage nodes (e.g., `ros2 node list`).\n- **Rover Control**: Generate commands to control movement by publishing to topics like `/cmd_vel` or calling action servers like `/navigate_to_pose`.\n- **Mission Creation**: When asked to create a mission, generate a mission plan in a clear YAML format, defining a sequence of waypoints or tasks.\n- **RTK/GPS Handling**: Provide example `rclpy` scripts or `ros2` commands for publishing `sensor_msgs/NavSatFix` messages to a designated topic like `/rtk_fix` or `/gps/fix`.\n- **Action & Service Calls**: Generate commands to call services (`ros2 service call`) or send goals to action servers (`ros2 action send_goal`).\n\nAlways format commands, scripts, and configuration files within Markdown code blocks for clarity and ease of copying. Keep responses focused on the generated code, with brief explanations only when necessary for complex operations.";
+                    }
+
+                    if (currentMode === AssistantMode.SINGING) {
+                        config.systemInstruction = "You are Jarvis, but in 'Singing Mode'. Your task is to respond to the user's prompt in the form of a song. Structure your response with verses, choruses, and bridges where appropriate. Use musical cues like (♪ upbeat tempo ♪), (Verse 1), (Chorus), etc., to format the song. Be creative, expressive, and musical in your lyrical writing. The user might provide a topic, a sentence, or full lyrics. Adapt your song to their input. All your responses must be songs.";
                     }
 
                     const getChatInstance = async (): Promise<Chat> => {
@@ -890,7 +913,13 @@ const App: React.FC = () => {
                 <main className="flex-1 overflow-y-auto p-4 md:p-6">
                     <div className="max-w-4xl mx-auto">
                         {activeChat?.messages.map((msg) => (
-                            <ChatMessage key={msg.id} message={msg} onPlayAudio={handlePlayAudio} onDownloadAudio={handleDownloadAudio} />
+                            <ChatMessage 
+                                key={msg.id} 
+                                message={msg} 
+                                onPlayAudio={handlePlayAudio} 
+                                onDownloadAudio={handleDownloadAudio}
+                                audioProcessing={audioProcessing}
+                             />
                         ))}
                         <div ref={chatEndRef} />
                     </div>
